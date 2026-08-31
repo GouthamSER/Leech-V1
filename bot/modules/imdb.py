@@ -90,7 +90,7 @@ def get_poster(query, bulk=False, id=False, file=None):
         
     try:
         movie_obj = get_movie(movieid)
-        # imdbio returns Pydantic objects. Let's convert them to dictionaries to maintain compatibility with your original mapping
+        # imdbio returns Pydantic objects. Convert them to dictionaries to maintain compatibility
         movie = movie_obj.dict() if hasattr(movie_obj, 'dict') else movie_obj.model_dump() if hasattr(movie_obj, 'model_dump') else vars(movie_obj)
     except Exception as e:
         LOGGER.error(f"IMDb get_movie error: {e}")
@@ -108,6 +108,8 @@ def get_poster(query, bulk=False, id=False, file=None):
     # Safely extracting lists of actors/directors since they might be nested dicts from Pydantic
     def extract_names(item_list):
         if not item_list: return []
+        if isinstance(item_list, dict):
+            return [str(val) for val in item_list.values()]
         return [item.get('name', str(item)) if isinstance(item, dict) else str(item) for item in item_list]
 
     return {
@@ -147,33 +149,59 @@ def get_poster(query, bulk=False, id=False, file=None):
 def list_to_str(k):
     if not k:
         return ""
+        
+    # If it's a dictionary (like certificates: {"USA": "R"}), convert to list of strings
+    if isinstance(k, dict):
+        k = [f"{key}: {val}" for key, val in k.items()]
+    # If it's a set or other non-list iterable, convert to list
+    elif not isinstance(k, list):
+        try:
+            k = list(k)
+        except Exception:
+            k = [k]
+            
+    if len(k) == 0:
+        return ""
     elif len(k) == 1:
         return str(k[0])
     elif LIST_ITEMS:
         k = k[:int(LIST_ITEMS)]
-        return ' '.join(f'{elem},' for elem in k)[:-1]+' ...'
+        return ' '.join(f'{elem},' for elem in k)[:-1] + ' ...'
     else:
         return ' '.join(f'{elem},' for elem in k)[:-1]
 
 
 def list_to_hash(k, flagg=False, emoji=False):
-    listing = ""
     if not k:
         return ""
-    elif len(k) == 1:
+        
+    # Safely convert dicts/sets to lists
+    if isinstance(k, dict):
+        k = list(k.keys())
+    elif not isinstance(k, list):
+        try:
+            k = list(k)
+        except Exception:
+            k = [k]
+            
+    if len(k) == 0:
+        return ""
+        
+    listing = ""
+    if len(k) == 1:
         if not flagg:
             if emoji:
-                return str(IMDB_GENRE_EMOJI.get(k[0], '')+" #"+k[0].replace(" ", "_").replace("-", "_"))
-            return str("#"+k[0].replace(" ", "_").replace("-", "_"))
+                return str(IMDB_GENRE_EMOJI.get(k[0], '') + " #" + str(k[0]).replace(" ", "_").replace("-", "_"))
+            return str("#" + str(k[0]).replace(" ", "_").replace("-", "_"))
         try:
             conflag = (conn.get(name=k[0])).flag
-            return str(f"{conflag} #" + k[0].replace(" ", "_").replace("-", "_"))
+            return str(f"{conflag} #" + str(k[0]).replace(" ", "_").replace("-", "_"))
         except AttributeError:
-            return str("#"+k[0].replace(" ", "_").replace("-", "_"))
+            return str("#" + str(k[0]).replace(" ", "_").replace("-", "_"))
     elif LIST_ITEMS:
         k = k[:int(LIST_ITEMS)]
         for elem in k:
-            ele = elem.replace(" ", "_").replace("-", "_")
+            ele = str(elem).replace(" ", "_").replace("-", "_")
             if flagg:
                 with suppress(AttributeError):
                     conflag = (conn.get(name=elem)).flag
@@ -184,7 +212,7 @@ def list_to_hash(k, flagg=False, emoji=False):
         return f'{listing[:-2]}'
     else:
         for elem in k:
-            ele = elem.replace(" ", "_").replace("-", "_")
+            ele = str(elem).replace(" ", "_").replace("-", "_")
             if flagg:
                 try:
                     conflag = (conn.get(name=elem)).flag
