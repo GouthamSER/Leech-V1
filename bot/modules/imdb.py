@@ -3,8 +3,8 @@ from contextlib import suppress
 from re import findall, IGNORECASE
 from pycountry import countries as conn
 
-# Removed Cinemagoer, imported imdbio
-from imdbio import IMDb
+# Correctly importing the top-level functions from imdbio
+from imdbio import search_title, get_movie
 
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 from pyrogram.filters import command, regex
@@ -18,9 +18,6 @@ from bot.helper.telegram_helper.message_utils import sendMessage, editMessage
 from bot.helper.ext_utils.bot_utils import get_readable_time
 from bot.helper.telegram_helper.button_build import ButtonMaker
 
-# Initialize imdbio client (Adjust instantiation based on imdbio's exact docs)
-imdb_client = IMDb()
-
 IMDB_GENRE_EMOJI = {"Action": "🚀", "Adult": "🔞", "Adventure": "🌋", "Animation": "🎠", "Biography": "📜", "Comedy": "🪗", "Crime": "🔪", "Documentary": "🎞", "Drama": "🎭", "Family": "👨‍👩‍👧‍👦", "Fantasy": "🫧", "Film Noir": "🎯", "Game Show": "🎮", "History": "🏛", "Horror": "🧟", "Musical": "🎻", "Music": "🎸", "Mystery": "🧳", "News": "📰", "Reality-TV": "🖥", "Romance": "🥰", "Sci-Fi": "🌠", "Short": "📝", "Sport": "⛳", "Talk-Show": "👨‍🍳", "Thriller": "🗡", "War": "⚔", "Western": "🪩"}
 LIST_ITEMS = 4
 
@@ -33,19 +30,19 @@ async def imdb_search(_, message):
         
         if title.lower().startswith("https://www.imdb.com/title/tt"):
             movieid = title.replace("https://www.imdb.com/title/tt", "")
-            # Fetch details via imdbio
-            if movie := imdb_client.get_details(movieid): 
-                buttons.ibutton(f"🎬 {movie.get('title')} ({movie.get('year')})", f"imdb {user_id} movie {movieid}")
-            else:
+            
+            try:
+                # Need the 'tt' prefix for get_movie
+                movie = get_movie(f"tt{movieid}")
+                buttons.ibutton(f"🎬 {movie.title} ({movie.year})", f"imdb {user_id} movie tt{movieid}")
+            except Exception:
                 return await editMessage(k, "<i>No Results Found</i>")
         else:
             movies = get_poster(title, bulk=True)
             if not movies:
                 return await editMessage(k, "<i>No Results Found</i>, Try Again or Use <b>Title ID</b>")
             for movie in movies:
-                # Assuming imdbio returns an 'id' key instead of a movieID attribute
-                movie_id = movie.get('id', movie.get('imdbID', ''))
-                buttons.ibutton(f"🎬 {movie.get('title')} ({movie.get('year')})", f"imdb {user_id} movie {movie_id}")
+                buttons.ibutton(f"🎬 {movie.title} ({movie.year})", f"imdb {user_id} movie {movie.imdb_id}")
         
         buttons.ibutton("🚫 Close 🚫", f"imdb {user_id} close")
         await editMessage(k, '<b><i>Here What I found on IMDb.com</i></b>', buttons.build_menu(1))
@@ -69,79 +66,83 @@ def get_poster(query, bulk=False, id=False, file=None):
         else:
             year = None
             
-        # Search via imdbio
-        search_results = imdb_client.search(title.lower())
-        if not search_results:
+        try:
+            if year:
+                # imdbio supports year filtering directly inside search_title
+                search_results = search_title(title.lower(), year=int(year))
+            else:
+                search_results = search_title(title.lower())
+                
+            if not search_results or not getattr(search_results, 'titles', None):
+                return None
+                
+            filtered = search_results.titles
+        except Exception as e:
+            LOGGER.error(f"IMDb search error: {e}")
             return None
-            
-        if year:
-            filtered = list(filter(lambda k: str(k.get('year')) == str(year), search_results)) or search_results
-        else:
-            filtered = search_results
-            
-        # Adjust 'kind' check based on imdbio's specific response values
-        filtered = list(filter(lambda k: k.get('kind', '').lower() in ['movie', 'tv series', 'tv'], filtered)) or filtered
         
         if bulk:
             return filtered
             
-        movieid = filtered[0].get('id', filtered[0].get('imdbID'))
+        movieid = filtered[0].imdb_id
     else:
         movieid = query
         
-    # Fetch specific movie details via imdbio
-    movie = imdb_client.get_details(movieid)
+    try:
+        movie_obj = get_movie(movieid)
+        # imdbio returns Pydantic objects. Let's convert them to dictionaries to maintain compatibility with your original mapping
+        movie = movie_obj.dict() if hasattr(movie_obj, 'dict') else movie_obj.model_dump() if hasattr(movie_obj, 'model_dump') else vars(movie_obj)
+    except Exception as e:
+        LOGGER.error(f"IMDb get_movie error: {e}")
+        return None
     
-    if movie.get("original air date"):
-        date = movie["original air date"]
-    elif movie.get("year"):
-        date = movie.get("year")
-    else:
-        date = "N/A"
+    date = movie.get("release_date") or movie.get("year") or "N/A"
         
-    plot = movie.get('plot')
+    plot = movie.get('plot', '') or movie.get('plot_outline', '')
     if isinstance(plot, list) and len(plot) > 0:
         plot = plot[0]
-    elif not plot:
-        plot = movie.get('plot outline', '')
         
     if plot and len(plot) > 300:
         plot = f"{plot[:300]}..."
         
-    # NOTE: You MUST verify these keys against imdbio's output. 
-    # Cinemagoer keys like 'full-size cover url' or 'number of seasons' likely differ in imdbio.
+    # Safely extracting lists of actors/directors since they might be nested dicts from Pydantic
+    def extract_names(item_list):
+        if not item_list: return []
+        return [item.get('name', str(item)) if isinstance(item, dict) else str(item) for item in item_list]
+
     return {
         'title': movie.get('title'),
-        'trailer': movie.get('videos'),
-        'votes': movie.get('votes'),
-        "aka": list_to_str(movie.get("akas")),
-        "seasons": movie.get("number of seasons"),
-        "box_office": movie.get('box office'),
-        'localized_title': movie.get('localized title'),
-        'kind': movie.get("kind"),
-        "imdb_id": f"tt{movie.get('id', movieid).replace('tt', '')}",
-        "cast": list_to_str(movie.get("cast")),
-        "runtime": list_to_str([get_readable_time(int(run) * 60) for run in movie.get("runtimes", ["0"])]),
-        "countries": list_to_hash(movie.get("countries"), True),
-        "certificates": list_to_str(movie.get("certificates")),
-        "languages": list_to_hash(movie.get("languages")),
-        "director": list_to_str(movie.get("director")),
-        "writer": list_to_str(movie.get("writer")),
-        "producer": list_to_str(movie.get("producer")),
-        "composer": list_to_str(movie.get("composer")) ,
-        "cinematographer": list_to_str(movie.get("cinematographer")),
-        "music_team": list_to_str(movie.get("music department")),
-        "distributors": list_to_str(movie.get("distributors")),
+        'trailer': movie.get('trailer', movie.get('videos')),
+        'votes': movie.get('votes', movie.get('num_votes')),
+        "aka": list_to_str(movie.get("akas", [])),
+        "seasons": movie.get("seasons", movie.get("number_of_seasons")),
+        "box_office": movie.get('box_office'),
+        'localized_title': movie.get('localized_title'),
+        'kind': movie.get("type", movie.get("kind")),
+        "imdb_id": movie.get('imdb_id', movieid),
+        "cast": list_to_str(extract_names(movie.get("cast", []))),
+        "runtime": list_to_str([get_readable_time(int(run) * 60) if str(run).isdigit() else run for run in movie.get("runtimes", ["0"])]),
+        "countries": list_to_hash(movie.get("countries", []), True),
+        "certificates": list_to_str(movie.get("certificates", [])),
+        "languages": list_to_hash(movie.get("languages", [])),
+        "director": list_to_str(extract_names(movie.get("directors", movie.get("director", [])))),
+        "writer": list_to_str(extract_names(movie.get("writers", movie.get("writer", [])))),
+        "producer": list_to_str(extract_names(movie.get("producers", movie.get("producer", [])))),
+        "composer": list_to_str(extract_names(movie.get("composers", movie.get("composer", [])))),
+        "cinematographer": list_to_str(extract_names(movie.get("cinematographers", movie.get("cinematographer", [])))),
+        "music_team": list_to_str(extract_names(movie.get("music_department", []))),
+        "distributors": list_to_str(extract_names(movie.get("distributors", []))),
         'release_date': date,
         'year': movie.get('year'),
-        'genres': list_to_hash(movie.get("genres"), emoji=True),
-        'poster': movie.get('cover url', movie.get('poster')), # Updated common key assumption
+        'genres': list_to_hash(movie.get("genres", []), emoji=True),
+        'poster': movie.get('poster', movie.get('cover_url')), 
         'plot': plot,
-        'rating': str(movie.get("rating", "N/A")) + " / 10",
-        'url': f"https://www.imdb.com/title/tt{movieid.replace('tt', '')}",
-        'url_cast': f"https://www.imdb.com/title/tt{movieid.replace('tt', '')}/fullcredits#cast",
-        'url_releaseinfo': f"https://www.imdb.com/title/tt{movieid.replace('tt', '')}/releaseinfo",
+        'rating': f'{movie.get("rating", "N/A")} / 10',
+        'url': f"https://www.imdb.com/title/{movie.get('imdb_id', movieid)}",
+        'url_cast': f"https://www.imdb.com/title/{movie.get('imdb_id', movieid)}/fullcredits#cast",
+        'url_releaseinfo': f"https://www.imdb.com/title/{movie.get('imdb_id', movieid)}/releaseinfo",
     }
+
 
 def list_to_str(k):
     if not k:
@@ -153,6 +154,7 @@ def list_to_str(k):
         return ' '.join(f'{elem},' for elem in k)[:-1]+' ...'
     else:
         return ' '.join(f'{elem},' for elem in k)[:-1]
+
 
 def list_to_hash(k, flagg=False, emoji=False):
     listing = ""
@@ -273,6 +275,7 @@ async def imdb_callback(_, query):
         await query.message.delete()
         with suppress(Exception):
             await query.message.reply_to_message.delete()
+
 
 bot.add_handler(MessageHandler(imdb_search, filters=command(BotCommands.IMDBCommand) & CustomFilters.authorized & ~CustomFilters.blacklisted))
 bot.add_handler(CallbackQueryHandler(imdb_callback, filters=regex(r'^imdb')))
